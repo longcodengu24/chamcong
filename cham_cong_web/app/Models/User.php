@@ -2,22 +2,20 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
-use Illuminate\Notifications\Notifiable;
 
 class User extends Authenticatable
 {
-    use HasFactory, Notifiable;
+    protected $table = 'user';
 
     protected $fillable = [
-        'name',
         'username',
         'password',
+        'name',
         'role',
         'rfid_uid',
-        'price',
-        'phone',
+        'rate_schedule',
     ];
 
     protected $hidden = [
@@ -29,16 +27,17 @@ class User extends Authenticatable
     {
         return [
             'password' => 'hashed',
+            'rate_schedule' => 'array',
         ];
-    }
-
-    public function nightRate(): int
-    {
-        return $this->price + 5000;
     }
 
     public function isAdmin(): bool
     {
         return $this->role === 'admin';
+    }
+
+    public function prices(): HasMany
+    {
+        return $this->hasMany(Price::class);
     }
 }

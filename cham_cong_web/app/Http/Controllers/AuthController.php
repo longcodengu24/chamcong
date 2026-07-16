@@ -2,10 +2,8 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
@@ -13,31 +11,28 @@ class AuthController extends Controller
     public function showLogin()
     {
         if (Auth::check()) {
-            return Auth::user()->isAdmin()
-                ? redirect()->route('admin.dashboard')
-                : redirect()->route('user.dashboard');
+            return $this->redirectForRole(Auth::user());
         }
+
         return view('auth.login');
     }
 
     public function login(Request $request)
     {
         $credentials = $request->validate([
-            'username' => 'required|string',
-            'password' => 'required|min:6',
+            'username' => ['required', 'string'],
+            'password' => ['required', 'string'],
         ]);
 
-        if (!Auth::attempt($credentials, $request->boolean('remember'))) {
+        if (! Auth::attempt($credentials)) {
             throw ValidationException::withMessages([
-                'username' => 'Tên đăng nhập hoặc mật khẩu không đúng.',
+                'username' => 'Tài khoản hoặc mật khẩu không đúng.',
             ]);
         }
 
         $request->session()->regenerate();
 
-        return Auth::user()->isAdmin()
-            ? redirect()->route('admin.dashboard')
-            : redirect()->route('user.dashboard');
+        return $this->redirectForRole(Auth::user());
     }
 
     public function logout(Request $request)
@@ -45,6 +40,12 @@ class AuthController extends Controller
         Auth::logout();
         $request->session()->invalidate();
         $request->session()->regenerateToken();
+
         return redirect()->route('login');
+    }
+
+    protected function redirectForRole($user)
+    {
+        return redirect()->to($user->isAdmin() ? '/admin' : '/user');
     }
 }

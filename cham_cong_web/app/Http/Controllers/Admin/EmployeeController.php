@@ -3,93 +3,145 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
-use App\Models\History;
+use App\Models\Price;
 use App\Models\User;
-use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class EmployeeController extends Controller
 {
     public function index()
     {
         $employees = User::orderBy('name')->get();
+
         return view('admin.employees.index', compact('employees'));
+    }
+
+    public function create()
+    {
+        return view('admin.employees.create');
     }
 
     public function store(Request $request)
     {
-        $data = $request->validate([
-            'name'     => 'required|string|max:100',
-            'username' => 'required|string|max:50|unique:users,username',
-            'password' => 'required|min:6|confirmed',
-            'role'     => 'required|in:admin,user',
-            'rfid_uid' => 'nullable|string|max:20|unique:users,rfid_uid',
-            'phone'    => 'nullable|string|max:20',
-            'price'    => 'required|integer|min:0',
-        ]);
+        $data = $this->validateEmployee($request);
+        $data['password'] = Hash::make($data['password']);
+        $data['rate_schedule'] = $this->extractRateSchedule($request);
 
-        $rfidUid = $data['rfid_uid'] ? strtoupper(trim($data['rfid_uid'])) : null;
+        User::create($data);
 
-        User::create([
-            'name'     => $data['name'],
-            'username' => $data['username'],
-            'password' => Hash::make($data['password']),
-            'role'     => $data['role'],
-            'rfid_uid' => $rfidUid,
-            'phone'    => $data['phone'] ?? null,
-            'price'    => $data['price'],
-        ]);
+        return redirect()->route('admin.employees.index')->with('status', 'Đã thêm nhân viên.');
+    }
 
-        // Dọn các bản ghi "quẹt thẻ chờ gán" (user_id null) trùng UID này, vì UID đã được gán rồi
-        if ($rfidUid) {
-            History::whereNull('user_id')->where('rfid_uid', $rfidUid)->delete();
+    public function edit(User $employee)
+    {
+        return view('admin.employees.edit', ['employee' => $employee]);
+    }
+
+    public function update(Request $request, User $employee)
+    {
+        $data = $this->validateEmployee($request, $employee);
+        $data['rate_schedule'] = $this->extractRateSchedule($request);
+
+        if (! empty($data['password'])) {
+            $data['password'] = Hash::make($data['password']);
+        } else {
+            unset($data['password']);
         }
 
-        return redirect()->route('admin.employees.index')
-            ->with('success', "Đã thêm nhân viên {$data['name']}");
+        $employee->update($data);
+
+        return redirect()->route('admin.employees.index')->with('status', 'Đã cập nhật nhân viên.');
     }
 
-    // ---- Quẹt thẻ trực tiếp: dựa vào các dòng history có user_id = null (ESP32 ghi khi gặp thẻ lạ) ----
-
-    public function startCardScan()
+    public function destroy(User $employee)
     {
-        return response()->json(['since' => now()->toIso8601String()]);
+        $employee->delete();
+
+        return redirect()->route('admin.employees.index')->with('status', 'Đã xóa nhân viên.');
     }
 
-    public function pollCardScan(Request $request)
+    /**
+     * Poll for the latest unassigned RFID card scan (used by the "quét thẻ" button).
+     *
+     * Cursor is the row id, not created_at/check_in: the ESP32 firmware writes
+     * straight to Supabase via REST and never sets created_at, so it's always
+     * null there and unusable for filtering.
+     */
+    public function latestScan(Request $request)
     {
-        $data = $request->validate(['since' => 'required|date']);
+        $afterId = (int) $request->query('after_id', 0);
 
-        $row = History::whereNull('user_id')
-            ->where('check_in', '>', Carbon::parse($data['since']))
-            ->orderByDesc('check_in')
+        $scan = Price::whereNull('user_id')
+            ->whereNotNull('rfid_uid')
+            ->where('id', '>', $afterId)
+            ->orderByDesc('id')
             ->first();
 
-        return response()->json(['uid' => $row?->rfid_uid]);
-    }
-
-    public function updatePrice(Request $request, User $employee)
-    {
-        $data = $request->validate([
-            'price' => 'required|integer|min:0',
+        return response()->json([
+            'found' => (bool) $scan,
+            'rfid_uid' => $scan?->rfid_uid,
+            'id' => $scan?->id,
         ]);
-
-        $employee->update(['price' => $data['price']]);
-
-        return redirect()->route('admin.employees.index')
-            ->with('success', "Đã cập nhật đơn giá của {$employee->name}");
     }
 
-    public function destroy(int $id)
+    private function validateEmployee(Request $request, ?User $employee = null): array
     {
-        $user = User::findOrFail($id);
-        if ($user->id === auth()->id()) {
-            return redirect()->back()->with('error', 'Không thể xoá tài khoản đang đăng nhập.');
-        }
-        $user->delete();
+        return $request->validate([
+            'username' => ['required', 'string', 'max:255', Rule::unique('user', 'username')->ignore($employee?->id)],
+            'password' => [$employee ? 'nullable' : 'required', 'string', 'min:6'],
+            'name' => ['required', 'string', 'max:255'],
+            'role' => ['required', Rule::in(['admin', 'user'])],
+            'rfid_uid' => ['nullable', 'string', 'max:255', Rule::unique('user', 'rfid_uid')->ignore($employee?->id)],
+        ]);
+    }
 
-        return redirect()->route('admin.employees.index')
-            ->with('success', 'Đã xoá nhân viên ' . $user->name);
+    /**
+     * Parse the repeatable "khung giờ" rows (rate_from[]/rate_to[]/rate_price[])
+     * submitted by the employee form into the JSON schedule stored on `user.rate_schedule`.
+     * This is now the only way pay is calculated — hours outside every declared
+     * range are simply unpaid (see the price trigger), so at least one row is required.
+     */
+    private function extractRateSchedule(Request $request): array
+    {
+        $froms = $request->input('rate_from', []);
+        $tos = $request->input('rate_to', []);
+        $rates = $request->input('rate_price', []);
+
+        $rules = [];
+        foreach ($froms as $i => $from) {
+            if (($from ?? '') === '' && ($tos[$i] ?? '') === '' && ($rates[$i] ?? '') === '') {
+                continue;
+            }
+
+            $rules["rate_from.$i"] = ['required', 'date_format:H:i'];
+            $rules["rate_to.$i"] = ['required', 'date_format:H:i'];
+            $rules["rate_price.$i"] = ['required', 'integer', 'min:0'];
+        }
+
+        $request->validate($rules);
+
+        $schedule = [];
+        foreach ($froms as $i => $from) {
+            if (($from ?? '') === '' && ($tos[$i] ?? '') === '' && ($rates[$i] ?? '') === '') {
+                continue;
+            }
+
+            $schedule[] = [
+                'from' => $from,
+                'to' => $tos[$i],
+                'rate' => (int) $rates[$i],
+            ];
+        }
+
+        if (empty($schedule)) {
+            throw ValidationException::withMessages([
+                'rate_from' => 'Cần khai báo ít nhất 1 khung giờ và đơn giá.',
+            ]);
+        }
+
+        return $schedule;
     }
 }

@@ -3,38 +3,27 @@
 namespace App\Http\Controllers\User;
 
 use App\Http\Controllers\Controller;
-use App\Models\History;
-use App\Services\PayrollCalculator;
-use Carbon\Carbon;
-use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Date;
 
 class DashboardController extends Controller
 {
-    public function index(Request $request)
+    public function index()
     {
-        $user    = auth()->user();
-        $rfidUid = $user->rfid_uid;
-        $month   = $request->get('month', now()->setTimezone('Asia/Ho_Chi_Minh')->format('Y-m'));
+        $user = Auth::user();
 
-        $sessions       = [];
-        $payroll        = null;
-        $isCheckedIn    = false;
+        $records = $user->prices()
+            ->whereNotNull('check_in')
+            ->orderByDesc('check_in')
+            ->paginate(20);
 
-        if ($rfidUid) {
-            $isCheckedIn = History::where('user_id', $user->id)->whereNull('check_out')->exists();
+        $totalThisMonth = $user->prices()
+            ->whereYear('check_in', Date::now()->year)
+            ->whereMonth('check_in', Date::now()->month)
+            ->sum('amount');
 
-            $records = History::where('user_id', $user->id)
-                ->whereBetween('check_in', [
-                    Carbon::createFromFormat('Y-m', $month)->startOfMonth(),
-                    Carbon::createFromFormat('Y-m', $month)->endOfMonth(),
-                ])
-                ->orderByDesc('check_in')
-                ->get();
+        $totalAllTime = $user->prices()->sum('amount');
 
-            $payroll  = PayrollCalculator::summary($records, $user->price, $user->nightRate());
-            $sessions = $payroll['sessions'];
-        }
-
-        return view('user.dashboard', compact('sessions', 'month', 'isCheckedIn', 'rfidUid', 'payroll'));
+        return view('user.dashboard', compact('records', 'totalThisMonth', 'totalAllTime'));
     }
 }
