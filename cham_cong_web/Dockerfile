@@ -20,7 +20,8 @@ COPY . .
 RUN composer install --no-dev --optimize-autoloader --no-interaction
 RUN npm install && npm run build
 
-RUN chmod -R 775 storage bootstrap/cache
+RUN mkdir -p storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs \
+    && chmod -R 775 storage bootstrap/cache
 
 EXPOSE 10000
 CMD php artisan migrate --force && php artisan serve --host=0.0.0.0 --port=${PORT:-10000}
